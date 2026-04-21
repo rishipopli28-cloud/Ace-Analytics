@@ -3,12 +3,14 @@ const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 const NodeCache = require("node-cache");
+const crypto = require("crypto");
 const path = require("path");
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 300 });
-const indexCache = new NodeCache({ stdTTL: 60 }); // 1min for indices
+const indexCache = new NodeCache({ stdTTL: 60 });
 const PORT = process.env.PORT || 3000;
+const ENC_KEY = process.env.ENC_KEY || "aceanalytics32bytesecretkey12345";
 
 app.use(cors());
 app.use(express.json());
@@ -16,6 +18,26 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY || "demo";
 const NEWS_API_KEY = process.env.NEWS_API_KEY || "";
+
+// ─── ENCRYPTION ──────────────────────────────────────────────────────────────
+const ALGO = "aes-256-cbc";
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const key = Buffer.from(ENC_KEY.slice(0, 32).padEnd(32, "0"));
+  const c = crypto.createCipheriv(ALGO, key, iv);
+  return iv.toString("hex") + ":" + Buffer.concat([c.update(text), c.final()]).toString("hex");
+}
+function decrypt(enc) {
+  try {
+    const [iv, data] = enc.split(":");
+    const key = Buffer.from(ENC_KEY.slice(0, 32).padEnd(32, "0"));
+    const d = crypto.createDecipheriv(ALGO, key, Buffer.from(iv, "hex"));
+    return Buffer.concat([d.update(Buffer.from(data, "hex")), d.final()]).toString();
+  } catch { return null; }
+}
+
+// In-memory broker store (use DB in production)
+const brokerStore = new Map();
 
 // ─── YAHOO FINANCE SESSION ────────────────────────────────────────────────────
 let _crumb = null, _cookies = "", _crumbExp = 0;
@@ -46,9 +68,7 @@ async function yfGet(url) {
   return axios.get(fu, { headers: { ...YFH, Cookie: s.cookies }, timeout: 12000 });
 }
 
-// ─── UNIVERSAL TICKER RESOLVER ────────────────────────────────────────────────
-// Supports ANY NSE/BSE stock by auto-appending .NS
-// Plus hardcoded common names for convenience
+// ─── TICKER RESOLVER ─────────────────────────────────────────────────────────
 const KNOWN = {
   reliance:"RELIANCE.NS",tcs:"TCS.NS",infosys:"INFY.NS",infy:"INFY.NS",
   hdfc:"HDFCBANK.NS",hdfcbank:"HDFCBANK.NS",icicibank:"ICICIBANK.NS",icici:"ICICIBANK.NS",
@@ -65,43 +85,29 @@ const KNOWN = {
   techm:"TECHM.NS",ltim:"LTIM.NS",divislab:"DIVISLAB.NS",divi:"DIVISLAB.NS",
   pidilite:"PIDILITIND.NS",mrf:"MRF.NS",bosch:"BOSCHLTD.NS",havells:"HAVELLS.NS",
   voltas:"VOLTAS.NS",irctc:"IRCTC.NS",zomato:"ZOMATO.NS",paytm:"PAYTM.NS",
-  nykaa:"NYKAA.NS",policybazaar:"POLICYBZR.NS",freshworks:"FRSH",
-  pgelectroplast:"PGEL.NS",pgel:"PGEL.NS",dixon:"DIXON.NS",
+  nykaa:"NYKAA.NS",pgelectroplast:"PGEL.NS",pgel:"PGEL.NS",dixon:"DIXON.NS",
   tatapower:"TATAPOWER.NS",adanigreen:"ADANIGREEN.NS",adanient:"ADANIENT.NS",
-  adanitrans:"ADANITRANS.NS",adanigas:"MGL.NS",coal:"COALINDIA.NS",coalindia:"COALINDIA.NS",
-  hindalco:"HINDALCO.NS",vedanta:"VEDL.NS",
-  bajajholdco:"BAJAJHLDNG.NS",motherson:"MOTHERSON.NS",
-  indusindbk:"INDUSINDBK.NS",indusind:"INDUSINDBK.NS",
-  federalbank:"FEDERALBNK.NS",idfcfirst:"IDFCFIRSTB.NS",
-  bandhanbank:"BANDHANBNK.NS",rblbank:"RBLBANK.NS",
+  coalindia:"COALINDIA.NS",hindalco:"HINDALCO.NS",vedanta:"VEDL.NS",
+  indusindbk:"INDUSINDBK.NS",indusind:"INDUSINDBK.NS",federalbank:"FEDERALBNK.NS",
+  idfcfirst:"IDFCFIRSTB.NS",bandhanbank:"BANDHANBNK.NS",rblbank:"RBLBANK.NS",
   pnb:"PNB.NS",bankofbaroda:"BANKBARODA.NS",canarabank:"CANBK.NS",
-  unionbank:"UNIONBANK.NS",iob:"IOB.NS",boi:"BANKINDIA.NS",
-  lichsgfin:"LICHSGFIN.NS",muthootfin:"MUTHOOTFIN.NS",cholamandalam:"CHOLAFIN.NS",
-  shreecement:"SHREECEM.NS",ambuja:"AMBUJACEM.NS",acc:"ACC.NS",
-  dalmia:"DALBHARAT.NS",ramco:"RAMCOCEM.NS",
-  suntvnetwork:"SUNTV.NS",zeel:"ZEEL.NS",pvrinox:"PVRINOX.NS",
-  inoxleisure:"PVRINOX.NS",balajitele:"BALAJITELE.NS",
-  drlalupath:"LALPATHLAB.NS",thyrocare:"THYROCARE.NS",
-  apollohosp:"APOLLOHOSP.NS",fortis:"FORTIS.NS",maxhealth:"MAXHEALTH.NS",
-  naukri:"NAUKRI.NS",infoeigde:"NAUKRI.NS",justdial:"JUSTDIAL.NS",
-  indiamart:"INDIAMART.NS",tradeindia:"INDIAMART.NS",
-  happyeasygo:"EASEMYTRIP.NS",makemytrip:"MMYT",
-  interglobe:"INDIGO.NS",indigo:"INDIGO.NS",spicejet:"SPICEJET.NS",
-  // US
+  apollohosp:"APOLLOHOSP.NS",fortis:"FORTIS.NS",naukri:"NAUKRI.NS",
+  indiamart:"INDIAMART.NS",indigo:"INDIGO.NS",spicejet:"SPICEJET.NS",
+  motherson:"MOTHERSON.NS",bajajhldng:"BAJAJHLDNG.NS",lichsgfin:"LICHSGFIN.NS",
+  muthootfin:"MUTHOOTFIN.NS",cholafin:"CHOLAFIN.NS",shreecem:"SHREECEM.NS",
+  ambuja:"AMBUJACEM.NS",acc:"ACC.NS",suntv:"SUNTV.NS",zeel:"ZEEL.NS",pvrinox:"PVRINOX.NS",
   apple:"AAPL",aapl:"AAPL",microsoft:"MSFT",msft:"MSFT",
   google:"GOOGL",alphabet:"GOOGL",googl:"GOOGL",amazon:"AMZN",amzn:"AMZN",
   tesla:"TSLA",tsla:"TSLA",nvidia:"NVDA",nvda:"NVDA",
   meta:"META",facebook:"META",netflix:"NFLX",nflx:"NFLX",
-  berkshire:"BRK-B",jpmorgan:"JPM",jpm:"JPM",visa:"V",mastercard:"MA",
-  walmart:"WMT",johnson:"JNJ",samsung:"005930.KS",
+  berkshire:"BRK-B",jpmorgan:"JPM",jpm:"JPM",visa:"V",mastercard:"MA",walmart:"WMT",
 };
 
 function resolveTicker(input) {
   const lower = input.trim().toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9.&]/g,"");
   if (KNOWN[lower]) return KNOWN[lower];
   const upper = input.trim().toUpperCase().replace(/\s+/g,"");
-  if (upper.includes(".NS")||upper.includes(".BO")||upper.includes(".KS")) return upper;
-  // If it looks like a pure ticker (1-6 uppercase chars), try as-is first then .NS
+  if (upper.includes(".NS")||upper.includes(".BO")) return upper;
   if (/^[A-Z0-9&-]{1,10}$/.test(upper)) return upper + ".NS";
   return upper + ".NS";
 }
@@ -114,39 +120,25 @@ async function fetchYahoo(ticker) {
     if (!d) throw new Error("No data");
     const { price:p={}, financialData:f={}, defaultKeyStatistics:s={}, summaryDetail:sd={}, assetProfile:ap={} } = d;
     return {
-      cmp: p.regularMarketPrice||null,
-      previousClose: p.regularMarketPreviousClose||null,
-      change: p.regularMarketChange||null,
-      changePercent: p.regularMarketChangePercent||null,
-      open: p.regularMarketOpen||null,
-      dayHigh: p.regularMarketDayHigh||null,
-      dayLow: p.regularMarketDayLow||null,
-      volume: p.regularMarketVolume||null,
-      avgVolume: p.averageDailyVolume3Month||null,
-      marketCap: p.marketCap||null,
-      pe: sd.trailingPE||s.trailingPE||null,
-      forwardPE: sd.forwardPE||s.forwardPE||null,
-      eps: s.trailingEps||null,
-      roe: f.returnOnEquity!=null?f.returnOnEquity*100:null,
-      debtToEquity: f.debtToEquity||null,
-      revenueGrowth: f.revenueGrowth!=null?f.revenueGrowth*100:null,
+      cmp: p.regularMarketPrice||null, previousClose: p.regularMarketPreviousClose||null,
+      change: p.regularMarketChange||null, changePercent: p.regularMarketChangePercent||null,
+      open: p.regularMarketOpen||null, dayHigh: p.regularMarketDayHigh||null,
+      dayLow: p.regularMarketDayLow||null, volume: p.regularMarketVolume||null,
+      avgVolume: p.averageDailyVolume3Month||null, marketCap: p.marketCap||null,
+      pe: sd.trailingPE||s.trailingPE||null, forwardPE: sd.forwardPE||s.forwardPE||null,
+      eps: s.trailingEps||null, roe: f.returnOnEquity!=null?f.returnOnEquity*100:null,
+      debtToEquity: f.debtToEquity||null, revenueGrowth: f.revenueGrowth!=null?f.revenueGrowth*100:null,
       grossMargins: f.grossMargins!=null?f.grossMargins*100:null,
       operatingMargins: f.operatingMargins!=null?f.operatingMargins*100:null,
       profitMargins: f.profitMargins!=null?f.profitMargins*100:null,
-      currentRatio: f.currentRatio||null,
-      fiftyTwoWeekHigh: sd.fiftyTwoWeekHigh||null,
-      fiftyTwoWeekLow: sd.fiftyTwoWeekLow||null,
-      fiftyDayAvg: p.fiftyDayAverage||null,
+      currentRatio: f.currentRatio||null, fiftyTwoWeekHigh: sd.fiftyTwoWeekHigh||null,
+      fiftyTwoWeekLow: sd.fiftyTwoWeekLow||null, fiftyDayAvg: p.fiftyDayAverage||null,
       twoHundredDayAvg: p.twoHundredDayAverage||null,
-      shortName: p.shortName||p.longName||ticker,
-      currency: p.currency||"INR",
-      exchange: p.exchangeName||"NSE",
-      sector: ap.sector||"—",
-      industry: ap.industry||"—",
-      website: ap.website||null,
-      employees: ap.fullTimeEmployees||null,
+      shortName: p.shortName||p.longName||ticker, currency: p.currency||"INR",
+      exchange: p.exchangeName||"NSE", sector: ap.sector||"—", industry: ap.industry||"—",
+      website: ap.website||null, employees: ap.fullTimeEmployees||null,
     };
-  } catch(e) { console.error(`[Yahoo] ${ticker}:`,e.message); return null; }
+  } catch(e) { console.error(`[Yahoo] ${ticker}:`, e.message); return null; }
 }
 
 async function fetchHistory(ticker, days=60) {
@@ -155,16 +147,8 @@ async function fetchHistory(ticker, days=60) {
     const r = await yfGet(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${start}&period2=${end}&interval=1d`);
     const result = r.data?.chart?.result?.[0];
     if (!result) return [];
-    const times = result.timestamp||[];
-    const closes = result.indicators?.quote?.[0]?.close||[];
-    const highs = result.indicators?.quote?.[0]?.high||[];
-    const lows = result.indicators?.quote?.[0]?.low||[];
-    const opens = result.indicators?.quote?.[0]?.open||[];
-    const vols = result.indicators?.quote?.[0]?.volume||[];
-    return times.map((t,i)=>({
-      date: new Date(t*1000).toISOString().slice(0,10),
-      open: opens[i], high: highs[i], low: lows[i], close: closes[i], volume: vols[i]
-    })).filter(d=>d.close!=null);
+    const times=result.timestamp||[], closes=result.indicators?.quote?.[0]?.close||[];
+    return times.map((t,i)=>({ date:new Date(t*1000).toISOString().slice(0,10), close:closes[i] })).filter(d=>d.close!=null);
   } catch { return []; }
 }
 
@@ -174,9 +158,7 @@ async function fetchIntraday(ticker) {
     const r = await yfGet(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?period1=${start}&period2=${end}&interval=5m`);
     const result = r.data?.chart?.result?.[0];
     if (!result) return [];
-    const times = result.timestamp||[];
-    const closes = result.indicators?.quote?.[0]?.close||[];
-    const vols = result.indicators?.quote?.[0]?.volume||[];
+    const times=result.timestamp||[], closes=result.indicators?.quote?.[0]?.close||[], vols=result.indicators?.quote?.[0]?.volume||[];
     return times.map((t,i)=>({
       time: new Date(t*1000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'}),
       close: closes[i], volume: vols[i]
@@ -184,7 +166,7 @@ async function fetchIntraday(ticker) {
   } catch { return []; }
 }
 
-// ─── INDICES ──────────────────────────────────────────────────────────────────
+// ─── INDICES ─────────────────────────────────────────────────────────────────
 async function fetchIndex(ticker) {
   try {
     const r = await yfGet(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`);
@@ -243,15 +225,15 @@ async function avSMA(ticker,period) {
   } catch { return null; }
 }
 
-// ─── NEWS ────────────────────────────────────────────────────────────────────
+// ─── NEWS ─────────────────────────────────────────────────────────────────────
 async function fetchNews(name) {
   const empty={articles:[],sentiment:"neutral",score:5,positive:0,negative:0,neutral:0};
   if (!NEWS_API_KEY) return empty;
   try {
     const r=await axios.get("https://newsapi.org/v2/everything",{params:{q:`${name} stock`,language:"en",sortBy:"publishedAt",pageSize:10,apiKey:NEWS_API_KEY},timeout:8000});
     const articles=r.data.articles||[];
-    const POS=["surge","rally","gain","profit","growth","upgrade","buy","bullish","beat","record","strong","rise","outperform","breakthrough","dividend","acquisition"];
-    const NEG=["fall","drop","loss","decline","downgrade","sell","bearish","miss","weak","plunge","concern","fraud","penalty","debt","cut","lawsuit","probe"];
+    const POS=["surge","rally","gain","profit","growth","upgrade","buy","bullish","beat","record","strong","rise","outperform","breakthrough","dividend"];
+    const NEG=["fall","drop","loss","decline","downgrade","sell","bearish","miss","weak","plunge","concern","fraud","penalty","debt","cut","lawsuit"];
     let pos=0,neg=0,neu=0;
     articles.forEach(a=>{
       const t=((a.title||"")+" "+(a.description||"")).toLowerCase();
@@ -263,7 +245,7 @@ async function fetchNews(name) {
     return {
       articles:articles.slice(0,5).map(({title,source,url,publishedAt})=>({title,source:source?.name,url,publishedAt})),
       sentiment, score:sentiment==="positive"?8:sentiment==="negative"?3:5,
-      positive:pos,negative:neg,neutral:neu
+      positive:pos, negative:neg, neutral:neu
     };
   } catch(e) { console.error("[News]",e.message); return empty; }
 }
@@ -277,7 +259,6 @@ function calcRSI(closes,period=14) {
   const rs=(g/period)/((l/period)||0.001);
   return parseFloat((100-100/(1+rs)).toFixed(2));
 }
-
 const SC={
   roe:v=>v==null?5:v>20?10:v>=15?8:v>=10?6:3,
   pe:(v,m=22)=>v==null?5:(v/m)<0.8?8:(v/m)<=1.2?5:3,
@@ -287,92 +268,74 @@ const SC={
   mom:(c,d5,d2)=>{let s=5;if(c&&d5)s+=c>d5?1.5:-1;if(c&&d2)s+=c>d2?1.5:-0.5;return Math.min(10,Math.max(1,s));},
   risk:(de,cr,rg)=>{let r=5;if(de!=null)r+=de>2?3:de>1?1.5:0;if(cr!=null&&cr<1)r+=2;if(rg!=null&&rg<0)r+=1;return Math.min(10,r);}
 };
-
-function composite(sc) {
+function composite(sc){
   const fund=(sc.roe+sc.pe)/2, tech=(sc.rsi+sc.momentum)/2;
   return parseFloat(Math.min(10,Math.max(0,fund*0.25+sc.valuation*0.25+tech*0.20+sc.sentiment*0.10-(sc.risk-5)*0.15)).toFixed(2));
 }
-
-function decision(s) {
+function getDecision(s){
   if(s>8) return {decision:"STRONG BUY",decisionColor:"strong-buy"};
   if(s>=6) return {decision:"BUY",decisionColor:"buy"};
   if(s>=4) return {decision:"HOLD",decisionColor:"hold"};
   if(s>=2) return {decision:"SELL",decisionColor:"sell"};
   return {decision:"AVOID",decisionColor:"avoid"};
 }
-
-function targets(cmp,intrinsic,dec) {
-  const p={STRONGBUY:0.22,BUY:0.15,HOLD:0.08,SELL:0.05,AVOID:0.03};
-  const pct=p[dec.replace(" ","")||"HOLD"]||0.10;
+function getTargets(cmp,intrinsic,dec){
+  const p={"STRONG BUY":0.22,"BUY":0.15,"HOLD":0.08,"SELL":0.05,"AVOID":0.03};
+  const pct=p[dec]||0.10;
   return {
     entry:`${(cmp*0.98).toFixed(2)}–${(cmp*1.01).toFixed(2)}`,
-    stop_loss:parseFloat((cmp*0.93).toFixed(2)),
-    target:intrinsic?parseFloat(Math.max(intrinsic,cmp*(1+pct)).toFixed(2)):parseFloat((cmp*(1+pct)).toFixed(2))
+    stop_loss: parseFloat((cmp*0.93).toFixed(2)),
+    target: intrinsic ? parseFloat(Math.max(intrinsic,cmp*(1+pct)).toFixed(2)) : parseFloat((cmp*(1+pct)).toFixed(2))
   };
 }
 
-// ─── MAIN ANALYZE ─────────────────────────────────────────────────────────────
+// ─── ANALYZE ENDPOINT ─────────────────────────────────────────────────────────
 app.get("/analyze", async(req,res)=>{
   const {stock}=req.query;
   if(!stock) return res.status(400).json({error:"Provide ?stock=RELIANCE"});
   const ticker=resolveTicker(stock);
-  const ckey=`v4_${ticker}`;
+  const ckey=`v5_${ticker}`;
   const hit=cache.get(ckey);
   if(hit) return res.json({...hit,cached:true});
-
   try {
     const [yahoo,news,rsiAV,macdAV,sma20,sma50,sma200] = await Promise.all([
       fetchYahoo(ticker),fetchNews(stock),avRSI(ticker),avMACD(ticker),avSMA(ticker,20),avSMA(ticker,50),avSMA(ticker,200)
     ]);
-
-    if(!yahoo?.cmp) {
-      // Try without .NS if it failed
-      const altTicker = ticker.endsWith(".NS") ? ticker.replace(".NS","") : ticker+".NS";
-      const alt = await fetchYahoo(altTicker);
-      if(!alt?.cmp) return res.status(404).json({error:`No data found for "${stock}". Try the exact NSE ticker e.g. IRCTC.NS`});
-    }
-
-    const yf = yahoo || await fetchYahoo(ticker.endsWith(".NS")?ticker.replace(".NS",""):ticker+".NS");
-
+    if(!yahoo?.cmp) return res.status(404).json({error:`No data for "${stock}". Try exact ticker: RELIANCE.NS`});
     let rsi=rsiAV;
-    if(!rsi){const closes=await fetchHistory(ticker,40).then(h=>h.map(d=>d.close));rsi=calcRSI(closes)??50;}
-
-    const dma20=sma20||null, dma50=sma50||yf.fiftyDayAvg, dma200=sma200||yf.twoHundredDayAvg;
+    if(!rsi){const h=await fetchHistory(ticker,40);rsi=calcRSI(h.map(d=>d.close))??50;}
+    const dma20=sma20||null, dma50=sma50||yahoo.fiftyDayAvg, dma200=sma200||yahoo.twoHundredDayAvg;
     const industryPE=22;
-    const intrinsic=yf.eps?parseFloat((yf.eps*industryPE).toFixed(2)):null;
-
+    const intrinsic=yahoo.eps?parseFloat((yahoo.eps*industryPE).toFixed(2)):null;
     const scores={
-      roe:SC.roe(yf.roe),pe:SC.pe(yf.pe,industryPE),rsi:SC.rsi(rsi),
-      debtEquity:SC.de(yf.debtToEquity),sentiment:news.score,
-      valuation:SC.val(yf.cmp,intrinsic),momentum:SC.mom(yf.cmp,dma50,dma200),
-      risk:SC.risk(yf.debtToEquity,yf.currentRatio,yf.revenueGrowth)
+      roe:SC.roe(yahoo.roe),pe:SC.pe(yahoo.pe,industryPE),rsi:SC.rsi(rsi),
+      debtEquity:SC.de(yahoo.debtToEquity),sentiment:news.score,
+      valuation:SC.val(yahoo.cmp,intrinsic),momentum:SC.mom(yahoo.cmp,dma50,dma200),
+      risk:SC.risk(yahoo.debtToEquity,yahoo.currentRatio,yahoo.revenueGrowth)
     };
     const score=composite({...scores,rsi:scores.rsi});
-    const {decision:dec,decisionColor}=decision(score);
-    const t=targets(yf.cmp,intrinsic,dec);
+    const {decision,decisionColor}=getDecision(score);
+    const targets=getTargets(yahoo.cmp,intrinsic,decision);
+    const intradayData=await fetchIntraday(ticker);
     const n=(v,d=2)=>v!=null?parseFloat(v.toFixed(d)):null;
-
-    // Fetch intraday chart data
-    const intradayData = await fetchIntraday(ticker);
-
     const result={
-      stock:ticker.replace(/\.(NS|BO)$/,""),fullName:yf.shortName,ticker,
+      stock:ticker.replace(/\.(NS|BO)$/,""),fullName:yahoo.shortName,ticker,
       timestamp:new Date().toISOString(),
-      cmp:yf.cmp,previousClose:yf.previousClose,
-      change:n(yf.change),changePercent:n(yf.changePercent),
-      open:yf.open,dayHigh:yf.dayHigh,dayLow:yf.dayLow,
-      volume:yf.volume,avgVolume:yf.avgVolume,marketCap:yf.marketCap,currency:yf.currency,
-      fiftyTwoWeekHigh:yf.fiftyTwoWeekHigh,fiftyTwoWeekLow:yf.fiftyTwoWeekLow,
-      pe:n(yf.pe),forwardPE:n(yf.forwardPE),eps:n(yf.eps),
-      roe:n(yf.roe),debtToEquity:n(yf.debtToEquity),
-      grossMargins:n(yf.grossMargins),operatingMargins:n(yf.operatingMargins),
-      profitMargins:n(yf.profitMargins),revenueGrowth:n(yf.revenueGrowth),currentRatio:n(yf.currentRatio),
+      cmp:yahoo.cmp,previousClose:yahoo.previousClose,
+      change:n(yahoo.change),changePercent:n(yahoo.changePercent),
+      open:yahoo.open,dayHigh:yahoo.dayHigh,dayLow:yahoo.dayLow,
+      volume:yahoo.volume,avgVolume:yahoo.avgVolume,marketCap:yahoo.marketCap,currency:yahoo.currency,
+      fiftyTwoWeekHigh:yahoo.fiftyTwoWeekHigh,fiftyTwoWeekLow:yahoo.fiftyTwoWeekLow,
+      pe:n(yahoo.pe),forwardPE:n(yahoo.forwardPE),eps:n(yahoo.eps),
+      roe:n(yahoo.roe),debtToEquity:n(yahoo.debtToEquity),
+      grossMargins:n(yahoo.grossMargins),operatingMargins:n(yahoo.operatingMargins),
+      profitMargins:n(yahoo.profitMargins),revenueGrowth:n(yahoo.revenueGrowth),currentRatio:n(yahoo.currentRatio),
       rsi:n(rsi),macd:macdAV,dma20,dma50:n(dma50),dma200:n(dma200),
       intrinsic_value:intrinsic,
       sentiment:news.sentiment,
       sentimentBreakdown:{positive:news.positive,negative:news.negative,neutral:news.neutral},
-      news:news.articles,scores,score,decision:dec,decisionColor,...t,
-      sector:yf.sector,industry:yf.industry,website:yf.website,employees:yf.employees,
+      news:news.articles,scores,score,decision,decisionColor,...targets,
+      sector:yahoo.sector,industry:yahoo.industry,website:yahoo.website,employees:yahoo.employees,
       intradayData,
     };
     cache.set(ckey,result);
@@ -386,27 +349,170 @@ app.get("/analyze", async(req,res)=>{
 app.get("/compare", async(req,res)=>{
   const stocks=(req.query.stocks||"").split(",").map(s=>s.trim()).filter(Boolean).slice(0,4);
   if(stocks.length<2) return res.status(400).json({error:"Need ≥2 stocks"});
-  const results=await Promise.all(stocks.map(s=>axios.get(`http://localhost:${PORT}/analyze?stock=${encodeURIComponent(s)}`).then(r=>r.data).catch(()=>({stock:s,error:"Failed"}))));
+  const results=await Promise.all(stocks.map(s=>
+    axios.get(`http://localhost:${PORT}/analyze?stock=${encodeURIComponent(s)}`).then(r=>r.data).catch(()=>({stock:s,error:"Failed"}))
+  ));
   res.json(results);
 });
 
-// Portfolio endpoints
-const portfolios = new Map();
-app.post("/portfolio", (req,res)=>{
-  const {id,holdings}=req.body;
-  if(!id||!holdings) return res.status(400).json({error:"Need id and holdings"});
-  portfolios.set(id,holdings);
-  res.json({success:true});
+// ─── BROKER API ENDPOINTS ─────────────────────────────────────────────────────
+
+// Save broker credentials (encrypted)
+app.post("/broker/connect", async(req,res)=>{
+  const {broker, apiKey, apiSecret, accessToken, userId} = req.body;
+  if(!broker||!apiKey) return res.status(400).json({error:"broker and apiKey required"});
+  const supported = ["zerodha","upstox","angelone"];
+  if(!supported.includes(broker.toLowerCase())) return res.status(400).json({error:`Unsupported broker. Use: ${supported.join(", ")}`});
+  const encKey = encrypt(apiKey);
+  const encSecret = apiSecret ? encrypt(apiSecret) : null;
+  const encToken = accessToken ? encrypt(accessToken) : null;
+  brokerStore.set(broker.toLowerCase(), { broker, encKey, encSecret, encToken, userId, connectedAt: new Date().toISOString() });
+  res.json({success:true, message:`${broker} connected successfully`, broker, connectedAt: new Date().toISOString()});
 });
-app.get("/portfolio/:id", (req,res)=>{
-  const h=portfolios.get(req.params.id);
-  if(!h) return res.status(404).json({error:"Not found"});
-  res.json(h);
+
+// Get broker connection status
+app.get("/broker/status", (req,res)=>{
+  const statuses = ["zerodha","upstox","angelone"].map(b=>{
+    const stored = brokerStore.get(b);
+    return { broker:b, connected:!!stored, connectedAt:stored?.connectedAt||null, userId:stored?.userId||null };
+  });
+  res.json(statuses);
+});
+
+// Disconnect broker
+app.post("/broker/disconnect", (req,res)=>{
+  const {broker} = req.body;
+  if(!broker) return res.status(400).json({error:"broker required"});
+  brokerStore.delete(broker.toLowerCase());
+  res.json({success:true, message:`${broker} disconnected`});
+});
+
+// Fetch holdings from Zerodha Kite
+async function fetchZerodhaHoldings(creds) {
+  try {
+    const token = decrypt(creds.encToken);
+    const key = decrypt(creds.encKey);
+    if(!token||!key) throw new Error("Invalid credentials");
+    const r = await axios.get("https://api.kite.trade/portfolio/holdings", {
+      headers: { "X-Kite-Version":"3", "Authorization":`token ${key}:${token}` },
+      timeout: 10000
+    });
+    return (r.data?.data||[]).map(h=>({
+      stock: h.tradingsymbol, qty: h.quantity, avgPrice: h.average_price,
+      lastPrice: h.last_price, pnl: h.pnl, dayChange: h.day_change,
+      dayChangePct: h.day_change_percentage, broker:"zerodha"
+    }));
+  } catch(e) { throw new Error("Zerodha: "+e.message); }
+}
+
+// Fetch holdings from Upstox
+async function fetchUpstoxHoldings(creds) {
+  try {
+    const token = decrypt(creds.encToken);
+    if(!token) throw new Error("Invalid credentials");
+    const r = await axios.get("https://api.upstox.com/v2/portfolio/long-term-holdings", {
+      headers: { "Authorization":`Bearer ${token}`, "Accept":"application/json" },
+      timeout: 10000
+    });
+    return (r.data?.data||[]).map(h=>({
+      stock: h.tradingsymbol, qty: h.quantity, avgPrice: h.average_price,
+      lastPrice: h.last_price, pnl: (h.last_price-h.average_price)*h.quantity,
+      dayChange: h.close_price-h.last_price, dayChangePct: 0, broker:"upstox"
+    }));
+  } catch(e) { throw new Error("Upstox: "+e.message); }
+}
+
+// Fetch holdings from Angel One SmartAPI
+async function fetchAngelHoldings(creds) {
+  try {
+    const token = decrypt(creds.encToken);
+    const key = decrypt(creds.encKey);
+    if(!token||!key) throw new Error("Invalid credentials");
+    const r = await axios.get("https://apiconnect.angelbroking.com/rest/secure/angelbroking/portfolio/v1/getAllHolding", {
+      headers: {
+        "Authorization":`Bearer ${token}`,
+        "X-ClientCode": creds.userId||"",
+        "X-APIKey": key,
+        "Accept":"application/json",
+        "Content-Type":"application/json"
+      },
+      timeout: 10000
+    });
+    return (r.data?.data?.holdings||[]).map(h=>({
+      stock: h.tradingsymbol, qty: parseInt(h.quantity)||0, avgPrice: parseFloat(h.averageprice)||0,
+      lastPrice: parseFloat(h.ltp)||0,
+      pnl: (parseFloat(h.ltp)-parseFloat(h.averageprice))*(parseInt(h.quantity)||0),
+      dayChange: 0, dayChangePct: parseFloat(h.profitandloss)||0, broker:"angelone"
+    }));
+  } catch(e) { throw new Error("AngelOne: "+e.message); }
+}
+
+// Sync portfolio from all connected brokers
+app.get("/broker/holdings", async(req,res)=>{
+  const allHoldings = [];
+  const errors = [];
+  const fetchers = { zerodha:fetchZerodhaHoldings, upstox:fetchUpstoxHoldings, angelone:fetchAngelHoldings };
+  for(const [broker, creds] of brokerStore.entries()) {
+    if(fetchers[broker]) {
+      try {
+        const h = await fetchers[broker](creds);
+        allHoldings.push(...h);
+      } catch(e) { errors.push({broker, error:e.message}); }
+    }
+  }
+  // Enrich with live prices via Yahoo if lastPrice missing
+  const enriched = await Promise.all(allHoldings.map(async h=>{
+    if(!h.lastPrice || h.lastPrice===0) {
+      try {
+        const ticker = resolveTicker(h.stock);
+        const r = await fetchYahoo(ticker);
+        if(r?.cmp) { h.lastPrice=r.cmp; h.pnl=(r.cmp-h.avgPrice)*h.qty; }
+      } catch(_) {}
+    }
+    const invested = h.avgPrice*h.qty;
+    const current = h.lastPrice*h.qty;
+    return { ...h, invested, current, returnPct: invested ? ((current-invested)/invested*100) : 0 };
+  }));
+  // Merge same stock from multiple brokers
+  const merged = {};
+  enriched.forEach(h=>{
+    if(merged[h.stock]) {
+      merged[h.stock].qty += h.qty;
+      merged[h.stock].invested += h.invested;
+      merged[h.stock].current += h.current;
+      merged[h.stock].pnl += h.pnl;
+      merged[h.stock].brokers = [...(merged[h.stock].brokers||[h.broker]), h.broker];
+    } else {
+      merged[h.stock] = {...h, brokers:[h.broker]};
+    }
+  });
+  const holdings = Object.values(merged).map(h=>({
+    ...h,
+    avgPrice: h.invested/h.qty,
+    returnPct: h.invested?((h.current-h.invested)/h.invested*100):0
+  }));
+  const totalInvested = holdings.reduce((a,h)=>a+h.invested,0);
+  const totalCurrent = holdings.reduce((a,h)=>a+h.current,0);
+  res.json({
+    holdings, errors,
+    summary:{ totalInvested, totalCurrent, totalPnl:totalCurrent-totalInvested, totalReturn:totalInvested?((totalCurrent-totalInvested)/totalInvested*100):0 },
+    syncedAt: new Date().toISOString()
+  });
+});
+
+// Quick price for single stock (used by manual portfolio)
+app.get("/price/:ticker", async(req,res)=>{
+  try {
+    const ticker = resolveTicker(req.params.ticker);
+    const yahoo = await fetchYahoo(ticker);
+    if(!yahoo?.cmp) return res.status(404).json({error:"Not found"});
+    res.json({ticker, cmp:yahoo.cmp, change:yahoo.change, changePercent:yahoo.changePercent, shortName:yahoo.shortName});
+  } catch(e) { res.status(500).json({error:e.message}); }
 });
 
 app.listen(PORT,()=>{
   console.log(`\n╔══════════════════════════════════════════════════╗`);
-  console.log(`║   ACE Analytics v2 — Luxury Edition              ║`);
+  console.log(`║   ACE Analytics — Luxury Edition v3              ║`);
   console.log(`║   http://localhost:${PORT}                           ║`);
   console.log(`╚══════════════════════════════════════════════════╝\n`);
 });
