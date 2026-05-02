@@ -1,15 +1,1 @@
-{
-  "name": "ace-analytics",
-  "version": "5.0.0",
-  "description": "ACE Analytics — Luxury Stock Intelligence Platform",
-  "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "dependencies": {
-    "express": "4.18.2",
-    "axios": "1.6.0",
-    "dotenv": "16.3.1",
-    "cors": "2.8.5",
-    "node-cache": "5.1.2",
-    "express-rate-limit": "7.1.5"
-  }
-}
+{"name":"ace-analytics","version":"6.0.0","scripts":{"start":"gunicorn app:app --bind 0.0.0.0:%PORT% --workers 1 --timeout 120"}} 
